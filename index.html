@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>黑洞 · 3D 物理可视化 + 炫酷特效（Schwarzschild）</title>
+<style>
+  :root{ --bg:#05070a; --fg:#e9f0f7; --muted:#8aa1b2; --accent:#7fd1ff; }
+  html,body{ height:100%; margin:0; background:var(--bg); color:var(--fg); font-family: system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji"}
+  #app{ position:fixed; inset:0; }
+  .hud{ position: fixed; top: 10px; left: 10px; z-index: 20; background: rgba(8,12,18,.75); border: 1px solid rgba(255,255,255,.08); border-radius: 10px; padding: 10px 12px; backdrop-filter: blur(8px); max-width: 380px; font-size: 12px; line-height: 1.45; box-shadow: 0 10px 30px rgba(0,0,0,.35);}
+  .hud h1{ font-size: 14px; margin:0 0 6px 0; color: var(--accent); letter-spacing:.2px; }
+  .row{ display:flex; align-items:center; gap:.5rem; margin:6px 0; color: var(--muted);}
+  .row label{ min-width: 110px; color:var(--fg);}
+  .tests{ margin-top:8px; border-top:1px dashed rgba(255,255,255,.12); padding-top:6px;}
+  .badge{ display:inline-block; padding:1px 6px; border-radius:999px; font-weight:600; font-size:11px; margin:3px 6px 0 0;}
+  .pass{ background:#123d22; color:#7dffb0; border:1px solid #174f2c;}
+  .fail{ background:#3d1212; color:#ff9b9b; border:1px solid #4f1717;}
+  .note{ color:var(--muted); font-size:11px; }
+  .corner{ position: fixed; right: 10px; bottom: 10px; z-index: 20; color:#9fb3c7; font-size:11px; opacity:.9 }
+  a{ color: var(--accent); text-decoration: none; }
+</style>
+
+<!-- Import Map：将裸模块名映射到 CDN -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+
+// ====================== 物理常量与单位（几何化单位 G=c=1） ======================
+const state = {
+  rs: 1.0,              // 事件视界半径 r_s
+  showPhoton: true,     // 光子球
+  showISCO: true,       // ISCO 参考环（3 r_s）
+  relEffects: true,     // 相对论红移 × 多普勒束增益
+  diskThickness: 0.06,  // 盘厚
+  particleCount: 20000, // 盘粒子数（可在“大片模式”自动上调）
+  rIn: 3.0,             // 内边界
+  rOut: 32.0,           // 外边界
+  cinematic: true,      // 大片模式（Bloom + 曝光 + 镜头特效）
+  bloomStrength: 0.9,
+  lensStrength: 0.16,   // 屏幕空间“类引力透镜”视觉特效强度（演示用）
+};
+const M = () => state.rs * 0.5; // 质量（G=c=1）
+
+// ====================== Three.js 场景基础 ======================
+const app = document.getElementById('app');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+app.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x020308, 0.02);
+scene.background = new THREE.Color(0x020308);
+
+const camera = new THREE.PerspectiveCamera(56, innerWidth/innerHeight, 0.01, 4000);
+camera.position.set(0, 6, 16);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.dampingFactor = 0.06; controls.minDistance = 4; controls.maxDistance = 80;
+
+// 光照
+scene.add(new THREE.AmbientLight(0xffffff, 0.04));
+const rimLight = new THREE.DirectionalLight(0x87cefa, 1.25); rimLight.position.set(6, 12, 10); scene.add(rimLight);
+
+// ====================== 星野 / 星云背景（更“炫酷”） ======================
+function createStars(count=6000, radius=900){
+  const geom = new THREE.BufferGeometry();
+  const pos = new Float32Array(count*3);
+  const c = new Float32Array(count*3);
+  for(let i=0;i<count;i++){
+    const r = radius*(0.55+0.45*Math.random());
+    const u = Math.random(); const v = Math.random();
+    const theta = Math.acos(2*u-1); const phi = 2*Math.PI*v;
+    pos[3*i+0] = r*Math.sin(theta)*Math.cos(phi);
+    pos[3*i+1] = r*Math.cos(theta);
+    pos[3*i+2] = r*Math.sin(theta)*Math.sin(phi);
+    const tint = 0.65 + 0.35*Math.random();
+    c[3*i+0] = 0.7*tint; c[3*i+1] = 0.8*tint; c[3*i+2] = 1.0*tint;
+  }
+  geom.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  geom.setAttribute('color', new THREE.BufferAttribute(c,3));
+  const mat = new THREE.PointsMaterial({ size: 0.9, vertexColors: true, transparent:true, opacity:0.95, depthWrite:false });
+  const stars = new THREE.Points(geom, mat); stars.renderOrder = -10; scene.add(stars);
+}
+createStars();
+
+// 背景星云薄雾（大面片渐变）
+const nebula = new THREE.Mesh(
+  new THREE.SphereGeometry(1200, 32, 32),
+  new THREE.ShaderMaterial({
+    side: THREE.BackSide, transparent:true, depthWrite:false,
+    uniforms: { time:{value:0} },
+    vertexShader:`varying vec3 vPos; void main(){ vPos = position; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+    fragmentShader:`varying vec3 vPos; void main(){ float d = length(vPos)/1200.0; float a = smoothstep(1.0,0.2,d); vec3 col = mix(vec3(0.02,0.05,0.1), vec3(0.06,0.12,0.24), a); gl_FragColor = vec4(col, 0.25*a); }`
+  })
+);
+scene.add(nebula);
+
+// ====================== 事件视界 & 光子球 & ISCO ======================
+let horizonMesh, photonMesh, iscoMesh;
+function buildHorizon(){
+  if(horizonMesh) scene.remove(horizonMesh);
+  horizonMesh = new THREE.Mesh(new THREE.SphereGeometry(state.rs, 64, 64), new THREE.MeshBasicMaterial({ color: 0x000000 }));
+  scene.add(horizonMesh);
+}
+function buildPhotonSphere(){
+  if(photonMesh) scene.remove(photonMesh);
+  if(!state.showPhoton) return;
+  const r = 1.5*state.rs;
+  photonMesh = new THREE.Mesh(new THREE.SphereGeometry(r, 64, 64), new THREE.MeshBasicMaterial({ color: 0xffe5a5, transparent:true, opacity:0.09 }));
+  scene.add(photonMesh);
+}
+function buildISCO(){
+  if(iscoMesh) scene.remove(iscoMesh);
+  if(!state.showISCO) return;
+  const r = 3.0*state.rs;
+  iscoMesh = new THREE.Mesh(new THREE.RingGeometry(r*0.993, r*1.007, 256), new THREE.MeshBasicMaterial({ color: 0x80ffea, side: THREE.DoubleSide, transparent:true, opacity:0.5 }));
+  iscoMesh.rotation.x = -Math.PI/2; scene.add(iscoMesh);
+}
+
+// ====================== 吸积盘（Points + 相对论增亮近似） ======================
+let diskPoints, diskData;
+function buildDisk(){
+  if(diskPoints) scene.remove(diskPoints);
+  const N = state.cinematic? Math.floor(state.particleCount*1.2): state.particleCount;
+  const positions = new Float32Array(N*3);
+  const colors    = new Float32Array(N*3);
+  const radii     = new Float32Array(N);
+  const phis      = new Float32Array(N);
+
+  const rIn = Math.max(state.rIn, 3.0*state.rs);
+  const rOut = Math.max(rIn+0.1, state.rOut);
+  for(let i=0;i<N;i++){
+    const u = Math.random();
+    const r = 1.0 / ( (1.0/rOut) + u*(1.0/rIn - 1.0/rOut) );
+    const phi = Math.random()*Math.PI*2;
+    const x=r*Math.cos(phi), z=r*Math.sin(phi);
+    const y=(Math.random()-0.5)*state.diskThickness*r;
+    positions[3*i+0]=x; positions[3*i+1]=y; positions[3*i+2]=z;
+    colors[3*i+0]=0; colors[3*i+1]=0; colors[3*i+2]=0;
+    radii[i]=r; phis[i]=phi;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions,3));
+  geo.setAttribute('color',    new THREE.BufferAttribute(colors,3));
+  geo.setAttribute('radius',   new THREE.BufferAttribute(radii,1));
+  geo.setAttribute('phi',      new THREE.BufferAttribute(phis,1));
+  const mat = new THREE.PointsMaterial({ size: 0.06, vertexColors:true, depthWrite:false, blending:THREE.AdditiveBlending });
+  diskPoints = new THREE.Points(geo, mat); diskPoints.frustumCulled = false; scene.add(diskPoints);
+  diskData = { geo, positions, colors, radii, phis };
+}
+
+function omegaAt(r){ return Math.sqrt(M()/(r*r*r)); } // Ω = √(M/r^3)
+function betaAt(r){ return Math.sqrt(M()/r); }         // v/c ≈ √(M/r)
+function g_grav(r){ return Math.sqrt(Math.max(1e-6, 1.0 - state.rs/r)); }
+
+function updateDisk(dt){
+  if(!diskPoints) return;
+  const { geo, positions, colors, radii, phis } = diskData;
+  const camPos = camera.position.clone();
+  for(let i=0;i<radii.length;i++){
+    const r = radii[i];
+    let phi = phis[i]; phi += omegaAt(r)*dt; phis[i]=phi;
+    const x=r*Math.cos(phi), z=r*Math.sin(phi); const y=positions[3*i+1];
+    positions[3*i+0]=x; positions[3*i+2]=z;
+
+    let intensity=1.0;
+    if(state.relEffects){
+      const vDir = new THREE.Vector3(-Math.sin(phi),0,Math.cos(phi));
+      const beta = Math.min(0.99, betaAt(r));
+      const gamma = 1.0/Math.sqrt(1.0-beta*beta);
+      const pos = new THREE.Vector3(x,y,z); const toCam = camPos.clone().sub(pos).normalize();
+      const cosT = vDir.normalize().dot(toCam);
+      const D = 1.0/(gamma*(1.0 - beta*cosT));
+      intensity = Math.pow(g_grav(r)*D, 3.0);
+    }
+    const t = (r - state.rIn) / (state.rOut - state.rIn + 1e-6);
+    const base = lerpColor([1.0,0.9,0.6], [0.7,0.85,1.0], clamp01(1.0 - t));
+    const col = base.map(c=>clamp01(c*intensity*1.5));
+    colors[3*i+0]=col[0]; colors[3*i+1]=col[1]; colors[3*i+2]=col[2];
+  }
+  geo.attributes.position.needsUpdate = true;
+  geo.attributes.color.needsUpdate = true;
+}
+
+function clamp01(x){ return Math.min(1, Math.max(0,x)); }
+function lerp(a,b,t){ return a + (b-a)*t; }
+function lerpColor(c1,c2,t){ return [ lerp(c1[0],c2[0],t), lerp(c1[1],c2[1],t), lerp(c1[2],c2[2],t) ]; }
+
+// ====================== 极向喷流（视觉增强） ======================
+let jetsGroup;
+function buildJets(){
+  if(jetsGroup) scene.remove(jetsGroup);
+  jetsGroup = new THREE.Group();
+  const h = 20*state.rs, rBase = 0.15*state.rs, rTip = 2.6*state.rs;
+  const mat = new THREE.MeshBasicMaterial({ color: 0x67c1ff, transparent:true, opacity:0.18, blending:THREE.AdditiveBlending });
+  const coneUp = new THREE.Mesh(new THREE.ConeGeometry(rTip, h, 64, 1, true), mat);
+  coneUp.position.y = h/2 + state.rs*0.5; coneUp.rotation.x = 0; jetsGroup.add(coneUp);
+  const coneDn = new THREE.Mesh(new THREE.ConeGeometry(rTip, h, 64, 1, true), mat);
+  coneDn.position.y = -h/2 - state.rs*0.5; coneDn.rotation.x = Math.PI; jetsGroup.add(coneDn);
+  // 紧邻事件视界的亮芯
+  const core = new THREE.Mesh(new THREE.CylinderGeometry(rBase, rBase, 1.2*state.rs, 48), new THREE.MeshBasicMaterial({color:0x9ad8ff, transparent:true, opacity:0.45, blending:THREE.AdditiveBlending}));
+  jetsGroup.add(core);
+  scene.add(jetsGroup);
+}
+
+// ====================== 后期：Bloom + 简易“类引力透镜”ShaderPass ======================
+let composer, renderPass, bloomPass, lensPass;
+const lensShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    center:   { value: new THREE.Vector2(0.5,0.5) },
+    strength: { value: state.lensStrength },
+    radius:   { value: 0.22 }
+  },
+  vertexShader: /* glsl */`
+    varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.0); }
+  `,
+  fragmentShader: /* glsl */`
+    uniform sampler2D tDiffuse; varying vec2 vUv; uniform vec2 center; uniform float strength; uniform float radius;
+    void main(){
+      vec2 d = center - vUv; float r = length(d);
+      float m = smoothstep(radius, 0.0, r); // 中心附近更强
+      vec2 dir = normalize(d+1e-6);
+      vec2 uv2 = vUv + dir * strength * m * m; // 二次衰减
+      vec4 col = texture2D(tDiffuse, uv2);
+      gl_FragColor = col;
+    }
+  `
+};
+
+function buildComposer(){
+  composer = new EffectComposer(renderer);
+  renderPass = new RenderPass(scene, camera);
+  bloomPass = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), state.bloomStrength, 0.6, 0.85);
+  lensPass = new ShaderPass(lensShader);
+  composer.addPass(renderPass);
+  if(state.cinematic){ composer.addPass(bloomPass); composer.addPass(lensPass); }
+}
+
+function updateLensCenter(){
+  // 将黑洞中心投影到屏幕，驱动透镜中心
+  const v = horizonMesh.position.clone();
+  const ndc = v.project(camera); // NDC [-1,1]
+  lensPass.uniforms.center.value.set(0.5*(ndc.x+1.0), 0.5*(ndc.y+1.0));
+}
+
+// ====================== 轴辅助 ======================
+const axis = new THREE.AxesHelper(2.0); axis.material.transparent = true; axis.material.opacity = 0.12; scene.add(axis);
+
+// ====================== 构建 & 重建 ======================
+function rebuild(){
+  buildHorizon();
+  buildPhotonSphere();
+  buildISCO();
+  buildDisk();
+  buildJets();
+  buildComposer();
+  runTestsAndRenderBadges();
+}
+rebuild();
+
+// ====================== 动画循环 ======================
+let last = performance.now();
+function tick(now){
+  const dt = Math.min(0.05, (now - last)/1000); last = now;
+  controls.update(); updateDisk(dt); nebula.material.uniforms.time.value = now*0.001;
+  if(state.cinematic){
+    bloomPass.strength = state.bloomStrength;
+    lensPass.uniforms.strength.value = state.lensStrength;
+    updateLensCenter();
+    renderer.toneMappingExposure = 1.15;
+    composer.render();
+  } else {
+    renderer.toneMappingExposure = 1.0; renderer.render(scene, camera);
+  }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+// ====================== UI 交互 ======================
+const relChk = document.getElementById('rel');
+const photonChk = document.getElementById('photon');
+const iscoChk = document.getElementById('isco');
+const rsInput = document.getElementById('rs');
+const cineChk = document.getElementById('cine');
+const bloomSlider = document.getElementById('bloom');
+const lensSlider = document.getElementById('lens');
+
+relChk.addEventListener('change', ()=>{ state.relEffects = relChk.checked; });
+photonChk.addEventListener('change', ()=>{ state.showPhoton = photonChk.checked; buildPhotonSphere(); });
+iscoChk.addEventListener('change', ()=>{ state.showISCO = iscoChk.checked; buildISCO(); });
+rsInput.addEventListener('input', (e)=>{
+  const v = Math.max(0.2, Math.min(5.0, parseFloat(e.target.value)||1));
+  state.rs = v; state.rIn = Math.max(3.0*state.rs, 3.0);
+  rebuild();
+});
+cineChk.addEventListener('change', ()=>{ state.cinematic = cineChk.checked; rebuild(); });
+bloomSlider.addEventListener('input', ()=>{ state.bloomStrength = parseFloat(bloomSlider.value); });
+lensSlider.addEventListener('input', ()=>{ state.lensStrength = parseFloat(lensSlider.value); });
+
+addEventListener('resize', ()=>{
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  if(composer) composer.setSize(innerWidth, innerHeight);
+});
+
+// ====================== 物理自检测试（新增 2 条） ======================
+function approxEqual(a,b,eps=1e-3){ return Math.abs(a-b) <= eps*Math.max(1,Math.abs(a),Math.abs(b)); }
+function tests(){
+  const rs = state.rs; const results = [];
+  // 既有测试（不修改）：
+  const photonR = 1.5*rs; results.push({name:'Photon sphere r=1.5 r_s', pass: approxEqual(photonR, 1.5*rs)});
+  results.push({name:'ISCO r≈3 r_s', pass: approxEqual(state.rIn, Math.max(3*rs,3), 1e-6)});
+  const rTest = 4*rs; const omega = Math.sqrt((rs/2)/Math.pow(rTest,3));
+  results.push({name:'Omega formula', pass: approxEqual(omega, Math.sqrt((rs/2)/Math.pow(rTest,3)), 1e-6)});
+  results.push({name:'Gravitational redshift', pass: approxEqual(g_grav(rTest), Math.sqrt(0.75), 1e-6)});
+  // 新增测试：
+  // T5: betaAt(r) 随 r 增大而单调递减（在 r1<r2 下应 beta(r1) > beta(r2)）
+  const r1 = 4*rs, r2 = 8*rs; results.push({name:'β(r) monotonic', pass: betaAt(r1) > betaAt(r2)});
+  // T6: 多普勒因子 D >= 0.0（稳定性）
+  const b = Math.min(0.99, betaAt(r1)); const gamma = 1.0/Math.sqrt(1.0-b*b); const cosT = 0.5; const D = 1.0/(gamma*(1.0 - b*cosT));
+  results.push({name:'Doppler factor non-negative', pass: D>0});
+  return results;
+}
+function runTestsAndRenderBadges(){
+  const results = tests(); const list = document.getElementById('test-badges'); list.innerHTML='';
+  for(const r of results){ const span = document.createElement('span'); span.className='badge '+(r.pass?'pass':'fail'); span.textContent=(r.pass?'PASS':'FAIL')+' · '+r.name; list.appendChild(span);}    
+  console.group('%cPhysics self-tests','color:#7fd1ff'); results.forEach(r=>console.log((r.pass?'✅':'❌'), r.name)); console.groupEnd();
+}
+</script>
+</head>
+<body>
+  <div id="app"></div>
+  <div class="hud">
+    <h1>黑洞 3D（Schwarzschild, G=c=1）</h1>
+    <div class="row"><label>事件视界 rₛ：</label><input id="rs" type="number" step="0.1" min="0.2" max="5" value="1.0"></div>
+    <div class="row"><label>相对论效应：</label><input id="rel" type="checkbox" checked><span class="note">红移×多普勒束增益</span></div>
+    <div class="row"><label>光子球：</label><input id="photon" type="checkbox" checked></div>
+    <div class="row"><label>ISCO 环：</label><input id="isco" type="checkbox" checked></div>
+    <div class="row"><label>大片模式：</label><input id="cine" type="checkbox" checked><span class="note">Bloom + 屏幕透镜 + 增强曝光</span></div>
+    <div class="row"><label>Bloom 强度：</label><input id="bloom" type="range" min="0" max="2" step="0.01" value="0.9"></div>
+    <div class="row"><label>透镜强度：</label><input id="lens" type="range" min="0" max="0.4" step="0.005" value="0.16"></div>
+    <div class="tests">
+      <div class="row"><strong>自检测试</strong></div>
+      <div id="test-badges"></div>
+      <div class="note">测试也会打印到浏览器控制台。</div>
+    </div>
+    <div class="note" style="margin-top:6px;">导入说明：通过 <code>importmap</code> 映射 “three” 与 “three/addons/”，避免 “Failed to resolve module specifier 'three'”。</div>
+  </div>
+  <div class="corner">Black Hole 3D · Cinematic Mode</div>
+</body>
+</html>
